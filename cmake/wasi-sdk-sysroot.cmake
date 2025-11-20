@@ -40,7 +40,6 @@ endif()
 set(default_cmake_args
   -DCMAKE_SYSTEM_NAME=WASI
   -DCMAKE_SYSTEM_VERSION=1
-  -DCMAKE_SYSTEM_PROCESSOR=wasm32
   -DCMAKE_BUILD_TYPE=${CMAKE_BUILD_TYPE}
   -DCMAKE_AR=${CMAKE_AR}
   -DCMAKE_C_COMPILER=${CMAKE_C_COMPILER}
@@ -100,6 +99,7 @@ endfunction()
 
 define_compiler_rt(wasm32-wasi)
 define_compiler_rt(wasm32-wasip1-threads)
+define_compiler_rt(wasm64-wasip1)
 
 # In addition to the default installation of `compiler-rt` itself also copy
 # around some headers and make copies of the `wasi` directory as `wasip1` and
@@ -124,6 +124,9 @@ add_custom_target(compiler-rt-post-build
   # Copy the `lib/wasm32-unknown-wasip1-threads` folder to `lib/wasm32-unknown-wasi-threads`
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${wasi_resource_dir}/lib/wasm32-unknown-wasip1-threads ${wasi_resource_dir}/lib/wasm32-unknown-wasi-threads
+
+  COMMAND ${CMAKE_COMMAND} -E copy_directory
+    ${wasi_resource_dir}/lib/wasm64-unknown-wasip1 ${wasi_resource_dir}/lib/wasm64-unknown-wasi
 
   COMMENT "finalizing compiler-rt installation"
 )
@@ -169,6 +172,8 @@ function(define_wasi_libc_sub target target_suffix lto)
 
   if(${target} MATCHES threads)
     set(libcompiler_rt_a ${wasi_resource_dir}/lib/wasm32-unknown-wasip1-threads/libclang_rt.builtins.a)
+  elseif(${target} MATCHES wasm64)
+    set(libcompiler_rt_a ${wasi_resource_dir}/lib/wasm64-unknown-wasip1/libclang_rt.builtins.a)
   else()
     set(libcompiler_rt_a ${wasi_resource_dir}/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a)
   endif()
