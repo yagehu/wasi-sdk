@@ -24,6 +24,7 @@ option(WASI_SDK_DEBUG_PREFIX_MAP "Pass `-fdebug-prefix-map` for built artifacts"
 option(WASI_SDK_INCLUDE_TESTS "Whether or not to build tests by default" OFF)
 option(WASI_SDK_INSTALL_TO_CLANG_RESOURCE_DIR "Whether or not to modify the compiler's resource directory" OFF)
 option(WASI_SDK_LTO "Whether or not to build LTO assets" ON)
+option(WASI_SDK_EXCEPTIONS "Whether or not C++ exceptions are enabled" OFF)
 set(WASI_SDK_CPU_CFLAGS "-mcpu=lime1" CACHE STRING "CFLAGS to specify wasm features to enable")
 
 set(wasi_tmp_install ${CMAKE_CURRENT_BINARY_DIR}/install)
@@ -88,6 +89,8 @@ function(define_compiler_rt target)
         -DCOMPILER_RT_BUILD_GWP_ASAN=OFF
         -DCMAKE_C_COMPILER_TARGET=${target}
         -DCMAKE_C_FLAGS=${WASI_SDK_CPU_CFLAGS}
+        -DCMAKE_CXX_FLAGS=${WASI_SDK_CPU_CFLAGS}
+        -DCMAKE_ASM_FLAGS=${WASI_SDK_CPU_CFLAGS}
         -DCMAKE_INSTALL_PREFIX=${wasi_resource_dir}
     EXCLUDE_FROM_ALL ON
     USES_TERMINAL_CONFIGURE ON
@@ -97,13 +100,24 @@ function(define_compiler_rt target)
   add_dependencies(compiler-rt-build compiler-rt-build-${target})
 endfunction()
 
-define_compiler_rt(wasm32-wasi)
+# The `compiler-rt` for `wasm32-wasip1` will be reused for `wasm32-wasip2` and
+# `wasm32-wasi`. The version for `wasm32-wasip1-threads` will be reused for
+# `wasm32-wasi-threads`. Different builds are needed for different codegen flags
+# and such across the threaded/not target.
+define_compiler_rt(wasm32-wasip1)
 define_compiler_rt(wasm32-wasip1-threads)
 define_compiler_rt(wasm64-wasip1)
 
+# If a p3 target is requested, also build compiler-rt for that target. WASIp3
+# will eventually have a different ABI than wasm32-wasip2, so this separate
+# build is needed.
+if(WASI_SDK_TARGETS MATCHES p3)
+  define_compiler_rt(wasm32-wasip3)
+endif()
+
 # In addition to the default installation of `compiler-rt` itself also copy
 # around some headers and make copies of the `wasi` directory as `wasip1` and
-# `wasip2`
+# `wasip2` and `wasip3`
 execute_process(
   COMMAND ${CMAKE_C_COMPILER} -print-resource-dir
   OUTPUT_VARIABLE clang_resource_dir
@@ -115,12 +129,12 @@ add_custom_target(compiler-rt-post-build
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${clang_resource_dir}/include ${wasi_resource_dir}/include
 
-  # Copy the `lib/wasm32-unknown-wasi` folder to `lib/wasm32-unknown-wasi{p1,p2}` to ensure that those
+  # Copy the `lib/wasm32-unknown-wasip1` folder to `lib/wasm32-unknown-wasi{,p2}` to ensure that those
   # OS-strings also work for looking up the compiler-rt.a file.
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${wasi_resource_dir}/lib/wasm32-unknown-wasi ${wasi_resource_dir}/lib/wasm32-unknown-wasip1
+    ${wasi_resource_dir}/lib/wasm32-unknown-wasip1 ${wasi_resource_dir}/lib/wasm32-unknown-wasi
   COMMAND ${CMAKE_COMMAND} -E copy_directory
-    ${wasi_resource_dir}/lib/wasm32-unknown-wasi ${wasi_resource_dir}/lib/wasm32-unknown-wasip2
+    ${wasi_resource_dir}/lib/wasm32-unknown-wasip1 ${wasi_resource_dir}/lib/wasm32-unknown-wasip2
   # Copy the `lib/wasm32-unknown-wasip1-threads` folder to `lib/wasm32-unknown-wasi-threads`
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${wasi_resource_dir}/lib/wasm32-unknown-wasip1-threads ${wasi_resource_dir}/lib/wasm32-unknown-wasi-threads
@@ -134,38 +148,25 @@ add_dependencies(compiler-rt-post-build compiler-rt-build)
 
 add_custom_target(compiler-rt DEPENDS compiler-rt-build compiler-rt-post-build)
 
-
 # =============================================================================
 # wasi-libc build logic
 # =============================================================================
 
 function(define_wasi_libc_sub target target_suffix lto)
-  set(build_dir ${CMAKE_CURRENT_BINARY_DIR}/wasi-libc-${target}${target_suffix})
-
   string(TOUPPER ${CMAKE_BUILD_TYPE} CMAKE_BUILD_TYPE_UPPER)
   get_property(directory_cflags DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY COMPILE_OPTIONS)
-  list(APPEND directory_cflags -resource-dir ${wasi_resource_dir})
-  set(extra_cflags_list
-    "${WASI_SDK_CPU_CFLAGS} ${CMAKE_C_FLAGS} ${directory_cflags} ${CMAKE_C_FLAGS_${CMAKE_BUILD_TYPE_UPPER}}")
+  set(extra_cflags_list "${WASI_SDK_CPU_CFLAGS} ${CMAKE_C_FLAGS} ${directory_cflags}")
 
-  set(extra_make_flags default)
-
-  # If LTO is enabled then pass that on to wasi-libc, and otherwise make sure to
-  # build a `libc.so` dynamic library where possible (not compatible with
-  # threads though)
-  if(lto)
-    list(APPEND extra_make_flags LTO=full)
-  elseif(NOT ${target} MATCHES threads)
-    list(APPEND extra_make_flags libc_so)
+  if(${target} MATCHES "p[23]")
+    # Always enable `-fPIC` for the `wasm32-wasip2` and `wasm32-wasip3` targets.
+    # This makes `libc.a` more flexible and usable in dynamic linking situations.
+    list(APPEND extra_cflags_list -fPIC)
   endif()
 
-  if(${target} MATCHES threads)
-    list(APPEND extra_make_flags THREAD_MODEL=posix)
-  elseif(${target} MATCHES p2)
-    list(APPEND extra_make_flags WASI_SNAPSHOT=p2)
-    # Always enable `-fPIC` for the `wasm32-wasip2` target. This makes `libc.a`
-    # more flexible and usable in dynamic linking situations.
-    list(APPEND extra_cflags_list -fPIC)
+  # The `wasm32-wasi` target is deprecated in clang, so ignore the deprecation
+  # warnings for now.
+  if(${target} STREQUAL wasm32-wasi OR ${target} STREQUAL wasm32-wasi-threads)
+    list(APPEND extra_cflags_list -Wno-deprecated)
   endif()
 
   list(JOIN extra_cflags_list " " extra_cflags)
@@ -178,25 +179,26 @@ function(define_wasi_libc_sub target target_suffix lto)
     set(libcompiler_rt_a ${wasi_resource_dir}/lib/wasm32-unknown-wasip1/libclang_rt.builtins.a)
   endif()
 
+  set(extra_cmake_args)
+
+  # Configure LTO in wasi libc if it's enabled. Be sure to disable shared
+  # libraries as well since that's not currently supported.
+  if (lto)
+    list(APPEND extra_cmake_args -DLTO=full -DBUILD_SHARED=OFF)
+  endif()
+
   ExternalProject_Add(wasi-libc-${target}${target_suffix}-build
-    # Currently wasi-libc doesn't support out-of-tree builds so feign a
-    # "download command" which copies the source tree to a different location
-    # so out-of-tree builds are supported.
-    DOWNLOAD_COMMAND
-      ${CMAKE_COMMAND} -E copy_directory ${wasi_libc} ${build_dir}
-    SOURCE_DIR "${build_dir}"
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND
-      ${MAKE} -j8 -C ${build_dir}
-        CC=${CMAKE_C_COMPILER}
-        AR=${CMAKE_AR}
-        NM=${CMAKE_NM}
-        SYSROOT=${wasi_sysroot}
-        EXTRA_CFLAGS=${extra_cflags}
-        TARGET_TRIPLE=${target}
-        BUILTINS_LIB=${libcompiler_rt_a}
-        ${extra_make_flags}
-    INSTALL_COMMAND ""
+    SOURCE_DIR ${wasi_libc}
+    CMAKE_ARGS
+      ${default_cmake_args}
+      ${extra_cmake_args}
+      -DTARGET_TRIPLE=${target}
+      -DCMAKE_INSTALL_PREFIX=${wasi_sysroot}
+      -DCMAKE_C_FLAGS=${extra_cflags}
+      -DCMAKE_ASM_FLAGS=${extra_cflags}
+      -DBUILTINS_LIB=${libcompiler_rt_a}
+      -DUSE_WASM_COMPONENT_LD=OFF
+      -DWASI_SDK_VERSION=${wasi_sdk_version}
     DEPENDS compiler-rt
     EXCLUDE_FROM_ALL ON
     USES_TERMINAL_CONFIGURE ON
@@ -254,6 +256,23 @@ function(define_libcxx_sub target target_suffix extra_target_flags extra_libdir_
     --sysroot ${wasi_sysroot}
     -resource-dir ${wasi_resource_dir})
 
+  if (WASI_SDK_EXCEPTIONS)
+    # TODO: lots of builds fail with shared libraries and `-fPIC`. Looks like
+    # things are maybe changing in llvm/llvm-project#159143 but otherwise I'm at
+    # least not really sure what the state of shared libraries and exceptions
+    # are. For now shared libraries are disabled and supporting them is left for
+    # a future endeavor.
+    set(pic OFF)
+    set(runtimes "libunwind;${runtimes}")
+    list(APPEND extra_flags -fwasm-exceptions -mllvm -wasm-use-legacy-eh=false)
+  endif()
+
+  # The `wasm32-wasi` target is deprecated in clang, so ignore the deprecation
+  # warnings for now.
+  if(${target} STREQUAL wasm32-wasi OR ${target} STREQUAL wasm32-wasi-threads)
+    list(APPEND extra_flags -Wno-deprecated)
+  endif()
+
   set(extra_cflags_list ${CMAKE_C_FLAGS} ${extra_flags})
   list(JOIN extra_cflags_list " " extra_cflags)
   set(extra_cxxflags_list ${CMAKE_CXX_FLAGS} ${extra_flags})
@@ -268,37 +287,37 @@ function(define_libcxx_sub target target_suffix extra_target_flags extra_libdir_
       -DCMAKE_INSTALL_INCLUDEDIR=${wasi_sysroot}/include/${target}
       -DCMAKE_STAGING_PREFIX=${wasi_sysroot}
       -DCMAKE_POSITION_INDEPENDENT_CODE=${pic}
-      -DCXX_SUPPORTS_CXX11=ON
       -DLIBCXX_ENABLE_THREADS:BOOL=ON
       -DLIBCXX_HAS_PTHREAD_API:BOOL=ON
       -DLIBCXX_HAS_EXTERNAL_THREAD_API:BOOL=OFF
-      -DLIBCXX_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF
       -DLIBCXX_HAS_WIN32_THREAD_API:BOOL=OFF
       -DLLVM_COMPILER_CHECKED=ON
       -DLIBCXX_ENABLE_SHARED:BOOL=${pic}
-      -DLIBCXX_ENABLE_EXPERIMENTAL_LIBRARY:BOOL=OFF
-      -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=OFF
+      -DLIBCXX_ENABLE_EXCEPTIONS:BOOL=${WASI_SDK_EXCEPTIONS}
       -DLIBCXX_ENABLE_FILESYSTEM:BOOL=ON
       -DLIBCXX_ENABLE_ABI_LINKER_SCRIPT:BOOL=OFF
       -DLIBCXX_CXX_ABI=libcxxabi
-      -DLIBCXX_CXX_ABI_INCLUDE_PATHS=${llvm_proj_dir}/libcxxabi/include
-      -DLIBCXX_HAS_MUSL_LIBC:BOOL=ON
+      -DLIBCXX_HAS_MUSL_LIBC:BOOL=OFF
       -DLIBCXX_ABI_VERSION=2
-      -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=OFF
+      -DLIBCXXABI_ENABLE_EXCEPTIONS:BOOL=${WASI_SDK_EXCEPTIONS}
       -DLIBCXXABI_ENABLE_SHARED:BOOL=${pic}
       -DLIBCXXABI_SILENT_TERMINATE:BOOL=ON
       -DLIBCXXABI_ENABLE_THREADS:BOOL=ON
       -DLIBCXXABI_HAS_PTHREAD_API:BOOL=ON
       -DLIBCXXABI_HAS_EXTERNAL_THREAD_API:BOOL=OFF
-      -DLIBCXXABI_BUILD_EXTERNAL_THREAD_LIBRARY:BOOL=OFF
       -DLIBCXXABI_HAS_WIN32_THREAD_API:BOOL=OFF
-      -DLIBCXXABI_ENABLE_PIC:BOOL=${pic}
-      -DLIBCXXABI_USE_LLVM_UNWINDER:BOOL=OFF
+      -DLIBCXXABI_USE_LLVM_UNWINDER:BOOL=${WASI_SDK_EXCEPTIONS}
+      -DLIBUNWIND_ENABLE_SHARED:BOOL=${pic}
+      -DLIBUNWIND_ENABLE_THREADS:BOOL=ON
+      -DLIBUNWIND_USE_COMPILER_RT:BOOL=ON
+      -DLIBUNWIND_INCLUDE_TESTS:BOOL=OFF
       -DUNIX:BOOL=ON
       -DCMAKE_C_FLAGS=${extra_cflags}
+      -DCMAKE_ASM_FLAGS=${extra_cflags}
       -DCMAKE_CXX_FLAGS=${extra_cxxflags}
       -DLIBCXX_LIBDIR_SUFFIX=/${target}${extra_libdir_suffix}
       -DLIBCXXABI_LIBDIR_SUFFIX=/${target}${extra_libdir_suffix}
+      -DLIBUNWIND_LIBDIR_SUFFIX=/${target}${extra_libdir_suffix}
       -DLIBCXX_INCLUDE_TESTS=OFF
       -DLIBCXX_INCLUDE_BENCHMARKS=OFF
 
@@ -313,6 +332,12 @@ function(define_libcxx_sub target target_suffix extra_target_flags extra_libdir_
     USES_TERMINAL_CONFIGURE ON
     USES_TERMINAL_BUILD ON
     USES_TERMINAL_INSTALL ON
+    PATCH_COMMAND
+      ${CMAKE_COMMAND} -E chdir .. bash -c
+        "git apply ${CMAKE_SOURCE_DIR}/src/llvm-pr-168449.patch || git apply ${CMAKE_SOURCE_DIR}/src/llvm-pr-168449.patch -R --check"
+    COMMAND
+      ${CMAKE_COMMAND} -E chdir .. bash -c
+        "git apply ${CMAKE_SOURCE_DIR}/src/llvm-pr-186054.patch || git apply ${CMAKE_SOURCE_DIR}/src/llvm-pr-186054.patch -R --check"
   )
 endfunction()
 

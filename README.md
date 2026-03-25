@@ -44,6 +44,7 @@ The Wasm-sdk's build process needs some packages :
 * `clang`
 * `ninja`
 * `python3`
+* `cargo`
 
 Please refer to your OS documentation to install those packages.
 
@@ -87,6 +88,10 @@ in compiling WebAssembly code. Supported CMake flags are:
 * `-DWASI_SDK_INCLUDE_TESTS=ON` - used for building tests.
 * `-DWASI_SDK_CPU_CFLAGS=..` - used to specify CFLAGS to tweak wasm features
   to enable/disable. The default is `-mcpu=lime1`.
+* `-DWASI_SDK_LTO=ON` - whether to enable/disable builds of LTO-capable
+  libraries as part of the build.
+* `-DWASI_SDK_EXCEPTIONS=ON` - whether to enable/disable support for C++
+  exceptions, see [CppExceptions.md](./CppExceptions.md) for more information.
 * `-DWASI_SDK_TEST_HOST_TOOLCHAIN=ON` - test the host toolchain's wasi-libc and
   sysroot libraries, don't build or use fresh libraries for tests.
 * `-DWASI_SDK_TARGETS=..` - a list of targets to build, by default all WASI
@@ -204,41 +209,30 @@ disabled in a configure step before building with WASI SDK.
 
 ## Notable Limitations
 
-This repository does not yet support __C++ exceptions__. C++ code is supported
-only with -fno-exceptions for now.
-Work on support for [exception handling] is underway at the
-language level which will support the features.
-
-[exception handling]: https://github.com/WebAssembly/exception-handling/
-
-See [C setjmp/longjmp support] about setjmp/longjmp support.
-
-[C setjmp/longjmp support]: SetjmpLongjmp.md
-
-This repository experimentally supports __threads__ with
-`--target=wasm32-wasip1-threads`. It uses WebAssembly's [threads] primitives
-(atomics, `wait`/`notify`, shared memory) and [wasi-threads] for spawning
-threads. Note: this is experimental &mdash; do not expect long-term stability!
-
-Note that the `pthread_*` family of functions, as well as C++ threading primitives
-such as `<atomic>`, `<mutex>`, and `<thread>` are available on all targets.
-Any attempt to spawn a thread will fail on `--target=wasm32-wasip1` or
-`--target=wasm32-wasip2`, but other functionality, such as locks, still works.
-This makes it easier to port C++ codebases, as only a fraction of code needs
-to be modified to build for the single-threaded targets.
-
-Defining a macro `_WASI_STRICT_PTHREAD` will make `pthread_create`,
-`pthread_detach`, `pthread_join`, `pthread_tryjoin_np`, and `pthread_timedjoin_np`
-fail with a compile time error when building for single-threaded targets.
+* C++ exceptions are disabled by default. For more information see
+  [CppExceptions.md].
+* C `setjmp`/`longjmp` require some extra configuration to get working, see
+  [SetjmpLongjmp.md].
+* Most targets do not support spawning a thread. Experimental support for
+  spawning threads is available with the `wasm32-wasip1-threads` target which
+  uses [wasi-threads]. Note that the `pthread_*` family of functions, as well as
+  C++ threading primitives such as `<atomic>`, `<mutex>`, and `<thread>` are
+  available on all targets. Defining a macro `_WASI_STRICT_PTHREAD` will make
+  `pthread_create`, `pthread_detach`, `pthread_join`, `pthread_tryjoin_np`, and
+  `pthread_timedjoin_np` fail with a compile time error when building for
+  single-threaded targets.
+* Dynamic linking [is supported][dylink] but not as fully baked as static
+  linking. There might be obscure bugs in some situations related to dynamic
+  linking.
+* The WASIp1 targets do not support networking, but WASIp2/WASIp3 support
+  networking.
+* 64-bit linear memories (a "wasm64" target) are not supported at this time.
+  Supporting this will require resolving [WebAssembly/component-model#22] first
+  at which point it will be possible to add a `wasm64-wasip2` target. There are
+  no plans to add support for `wasm64-wasi{,-threads,p1,p1-threads}` at this
+  time.
 
 [threads]: https://github.com/WebAssembly/threads
 [wasi-threads]: https://github.com/WebAssembly/wasi-threads
-
-This repository does not yet support __dynamic libraries__. While there are
-[some efforts] to design a system for dynamic libraries in wasm, it is still in
-development and not yet generally usable.
-
-[some efforts]: https://github.com/WebAssembly/tool-conventions/blob/master/DynamicLinking.md
-
-There is no support for __networking__. It is a goal of WASI to support
-networking in the future though.
+[dylink]: https://github.com/WebAssembly/tool-conventions/blob/master/DynamicLinking.md
+[WebAssembly/component-model#22]: https://github.com/WebAssembly/component-model/issues/22
